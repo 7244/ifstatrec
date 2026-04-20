@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++23 -O3 -ffast-math
+CXXFLAGS = -std=c++23 -Wall -Wextra -O3 -ffast-math
 LDFLAGS =
 
 release:

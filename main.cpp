@@ -58,7 +58,7 @@ int main(){
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
 
-  auto ns_per = 1000000;
+  auto ns_per = (uint64_t)1000000;
 
   auto interface = get_default_interface();
   std::print("using interface: {}\n", interface);
@@ -96,7 +96,6 @@ int main(){
   std::print("press ctrl+c to stop and save\n");
 
   auto wanted_time = T_nowi();
-  auto first_wanted_time = wanted_time;
 
   bool next_is_failed = false;
 
