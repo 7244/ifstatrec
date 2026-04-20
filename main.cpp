@@ -15,7 +15,7 @@ enum class data_point_code_t : uint8_t{
   delayed
 };
 
-std::string get_default_interface(){
+static std::string get_default_interface(){
   std::ifstream f("/proc/net/route");
   std::string line;
   std::string iface;
@@ -35,7 +35,7 @@ std::string get_default_interface(){
 uintptr_t counter_type_count;
 std::string_view *counter_type_name;
 
-data_point_code_t read_counters(const std::string& interface, uint64_t *counters){
+static data_point_code_t read_counters(const std::string& interface, uint64_t *counters){
   for(auto i = counter_type_count; i--;){
     std::ifstream f("/sys/class/net/" + interface + "/statistics/" + std::string(counter_type_name[i]));
     f >> counters[i];
@@ -43,14 +43,14 @@ data_point_code_t read_counters(const std::string& interface, uint64_t *counters
   return data_point_code_t::valid;
 }
 
-void diff_counters(uint64_t *counters0, uint64_t *counters1){
+static void diff_counters(uint64_t *counters0, uint64_t *counters1){
   for(auto i = counter_type_count; i--;){
     counters0[i] = counters1[i] - counters0[i];
   }
 }
 
 uintptr_t signal_came = false;
-void signal_handler(int){
+static void signal_handler(int){
   __atomic_store_n(&signal_came, true, __ATOMIC_SEQ_CST);
 }
 
@@ -85,19 +85,47 @@ int main(){
 
   std::print("press ctrl+c to stop and save\n");
 
-  /* lets warm thread a bit. */
+  /* lets warm thread */
   {
-    auto warm_start = T_nowi();
-    while(1){
-      /* shouldnt optimized away since it does file io. */
-      read_counters(interface, counters2[counter_flip]);
+    auto warm_thread = [&](){
+      auto warm_start = T_nowi();
+      while(1){
+        /* shouldnt optimized away since it does file io. */
+        read_counters(interface, counters2[counter_flip]);
 
-      if((sint64_t)T_nowi() - (sint64_t)warm_start > 100'000'000){
-        break;
+        if((sint64_t)T_nowi() - (sint64_t)warm_start > 100'000'000){
+          break;
+        }
+
+        /* funny that we warm it and relax same time. */
+        __processor_relax();
       }
+    };
 
-      /* funny that we warm it and relax same time. */
-      __processor_relax();
+    auto first_cpu = sched_getcpu();
+    if(first_cpu < 0){
+      __abort();
+    }
+  
+    warm_thread();
+
+    auto second_cpu = sched_getcpu();
+    {
+      if(second_cpu < 0){
+        __abort();
+      }
+    
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET(second_cpu, &set);
+    
+      if(sched_setaffinity(0, sizeof(cpu_set_t), &set) < 0){
+        __abort();
+      }
+    }
+
+    if(first_cpu != second_cpu){
+      warm_thread();
     }
   }
 
@@ -117,6 +145,7 @@ int main(){
   bool next_is_failed = false;
 
   uint64_t total_points = 0;
+  uint64_t total_failed_points = 0;
   while(!__atomic_load_n(&signal_came, __ATOMIC_SEQ_CST)){
     wanted_time += ns_per;
 
@@ -156,11 +185,17 @@ int main(){
       diff_counters(counters2[counter_flip], counters2[counter_flip ^ 1]);
       data.append_range(std::span((uint8_t*)counters2[counter_flip], counter_type_count * sizeof(uint64_t)));
     }
+    else{
+      total_failed_points += 1;
+    }
 
     total_points += 1;
   }
 
-  std::print("writing {} bytes with {} points to record.bin...\n", data.size(), total_points);
+  std::print("points:\n");
+  std::print("  total: {}\n", total_points);
+  std::print("  failed: {}\n", total_failed_points);
+  std::print("total size: {}\n", data.size());
 
   {
     std::ofstream f("record.ifsr", std::ios::binary);
