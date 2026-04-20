@@ -59,6 +59,7 @@ int main(){
   std::signal(SIGTERM, signal_handler);
 
   auto ns_per = (uint64_t)1000000;
+  auto inaccuracy_time_divide = (uint64_t)100;
 
   auto interface = get_default_interface();
   std::print("using interface: {}\n", interface);
@@ -79,8 +80,26 @@ int main(){
     counters2[0] = (uint64_t *)&((uint8_t*)_counters2)[0 * (counter_type_count * sizeof(uint64_t))];
     counters2[1] = (uint64_t *)&((uint8_t*)_counters2)[1 * (counter_type_count * sizeof(uint64_t))];
   }
-
+  
   uintptr_t counter_flip = 0;
+
+  std::print("press ctrl+c to stop and save\n");
+
+  /* lets warm thread a bit. */
+  {
+    auto warm_start = T_nowi();
+    while(1){
+      /* shouldnt optimized away since it does file io. */
+      read_counters(interface, counters2[counter_flip]);
+
+      if((sint64_t)T_nowi() - (sint64_t)warm_start > 100'000'000){
+        break;
+      }
+
+      /* funny that we warm it and relax same time. */
+      __processor_relax();
+    }
+  }
 
   {
     auto err = read_counters(interface, counters2[counter_flip]);
@@ -93,8 +112,6 @@ int main(){
   std::vector<uint8_t> data;
   data.reserve(1000000);
 
-  std::print("press ctrl+c to stop and save\n");
-
   auto wanted_time = T_nowi();
 
   bool next_is_failed = false;
@@ -103,10 +120,16 @@ int main(){
   while(!__atomic_load_n(&signal_came, __ATOMIC_SEQ_CST)){
     wanted_time += ns_per;
 
+    auto wanted_time_early = wanted_time - ns_per / inaccuracy_time_divide;
+
     auto now = decltype(T_nowi()){};
-    do{
+    while(1){
       now = T_nowi();
-    }while(now < wanted_time);
+      if(now >= wanted_time_early){
+        break;
+      }
+      __processor_relax();
+    }
 
     auto code = read_counters(interface, counters2[counter_flip]);
     counter_flip ^= 1;
@@ -114,11 +137,11 @@ int main(){
     /* incase function takes too long time */
     now = T_nowi();
 
-    auto diff = now - wanted_time;
+    auto diff = (sint64_t)now - (sint64_t)wanted_time;
     if(code != data_point_code_t::valid){
       next_is_failed = true;
     }
-    else if(diff >= ns_per / 100){
+    else if(diff >= (sint64_t)ns_per / 100){
       next_is_failed = true;
       code = data_point_code_t::delayed;
     }
