@@ -25,7 +25,12 @@
     const tooltip = document.getElementById('tooltip');
     const info = document.getElementById('info');
 
+    const FLAG_VALID = 0;
+    const FLAG_SAMPLING_DELAYED = 1;
+    const FLAG_POST_FAILED = 2;
+
     let data = [];
+    let nsPer = 0;
     let padding = 60;
     let width, height;
     let viewStart = 0;
@@ -63,7 +68,7 @@
       const { start, end } = getViewRange();
       if (start === end) return;
       const packets = getVisiblePackets();
-      const maxPackets = packets.length ? Math.max(...packets) : 1;
+      const maxPackets = packets.length ? Math.max(...packets.map(p => p.value)) : 1;
       const plotW = width - padding * 2;
       const plotH = height - padding * 2;
       const timeSpan = end - start;
@@ -105,8 +110,6 @@
         ctx.fillText((t / 1000).toFixed(2) + 's', x, height - padding + 20);
       }
 
-      const FAILED_VAL = 18446744073709551615;
-
       ctx.strokeStyle = '#2563eb';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -114,12 +117,12 @@
       for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
         const t = i;
         const x = padding + ((t - start) / timeSpan) * plotW;
-        const isFailed = data[i] === FAILED_VAL;
+        const isFailed = data[i].flags !== FLAG_VALID;
         if (isFailed) {
           prevFailed = true;
           continue;
         }
-        const y = height - padding - (data[i] / maxPackets) * plotH;
+        const y = height - padding - (data[i].value / maxPackets) * plotH;
         if (prevFailed || i === 0 || (i > 0 && (i - 1) < start)) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
         prevFailed = false;
@@ -130,10 +133,9 @@
       for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
         const t = i;
         const x = padding + ((t - start) / timeSpan) * plotW;
-        const isFailed = data[i] === FAILED_VAL;
+        const isFailed = data[i].flags !== FLAG_VALID;
         if (isFailed) {
-          ctx.fillStyle = '#dc2626';
-          ctx.strokeStyle = '#dc2626';
+          ctx.strokeStyle = data[i].flags === FLAG_SAMPLING_DELAYED ? '#dc2626' : '#f97316';
           ctx.lineWidth = 2;
           const y = padding + 10;
           ctx.beginPath();
@@ -143,7 +145,7 @@
           ctx.lineTo(x - 5, y + 5);
           ctx.stroke();
         } else {
-          const y = height - padding - (data[i] / maxPackets) * plotH;
+          const y = height - padding - (data[i].value / maxPackets) * plotH;
           ctx.fillStyle = '#2563eb';
           ctx.beginPath();
           ctx.arc(x, y, 2, 0, Math.PI * 2);
@@ -204,7 +206,7 @@
         const my = e.clientY - rect.top;
         const { start, end } = getViewRange();
         const packets = getVisiblePackets();
-        const maxPackets = packets.length ? Math.max(...packets) : 1;
+const maxPackets = packets.length ? Math.max(...packets.map(p => p.value)) : 1;
         const plotW = width - padding * 2;
         const plotH = height - padding * 2;
         const timeSpan = end - start;
@@ -218,8 +220,9 @@
           tooltip.style.display = 'block';
           tooltip.style.left = (e.clientX + 10) + 'px';
           tooltip.style.top = (e.clientY - 20) + 'px';
-          const isFailed = data[closestIdx] === 18446744073709551615;
-          tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  packets=${isFailed ? 'FAILED' : data[closestIdx]}`;
+          const isFailed = data[closestIdx].flags !== FLAG_VALID;
+          const flagLabel = data[closestIdx].flags === FLAG_SAMPLING_DELAYED ? 'SAMPLING_DELAYED' : data[closestIdx].flags === FLAG_POST_FAILED ? 'POST_FAILED' : '';
+          tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  packets=${isFailed ? flagLabel : data[closestIdx].value}`;
         }
       }
     });
@@ -245,14 +248,25 @@
       panStart = e.clientX;
     });
 
-    fetch('record.json')
-      .then(r => r.json())
-      .then(d => {
-        data = d;
+    fetch('record.bin')
+      .then(r => r.arrayBuffer())
+      .then(buf => {
+        const view = new DataView(buf);
+        const nsPerVal = view.getBigUint64(0, true);
+        const count = Number(view.getBigUint64(8, true));
+        nsPer = Number(nsPerVal);
+        data = [];
+        for (let i = 0; i < count; i++) {
+          const off = 16 + i * 9;
+          data.push({
+            value: Number(view.getBigUint64(off, true)),
+            flags: view.getUint8(off + 8),
+          });
+        }
         draw();
       })
       .catch(() => {
-        info.textContent = 'Error: record.json not found';
+        info.textContent = 'Error: record.bin not found';
       });
 
     window.addEventListener('resize', resize);

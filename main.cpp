@@ -1,6 +1,7 @@
 #include <WITCH/WITCH.h>
 #include <WITCH/PR/PR.h>
 #include <WITCH/T/T.h>
+#include <WITCH/generic_alloc.h>
 
 #include <fstream>
 #include <vector>
@@ -8,6 +9,11 @@
 #include <chrono>
 #include <csignal>
 #include <print>
+
+enum class data_point_code_t : uint8_t{
+  valid,
+  delayed
+};
 
 std::string get_default_interface(){
   std::ifstream f("/proc/net/route");
@@ -26,11 +32,21 @@ std::string get_default_interface(){
   __abort();
 }
 
-inline uint64_t read_counters(const std::string& interface){
-  uint64_t v;
-  std::ifstream f("/sys/class/net/" + interface + "/statistics/rx_packets");
-  f >> v;
-  return v;
+uintptr_t counter_type_count;
+std::string_view *counter_type_name;
+
+data_point_code_t read_counters(const std::string& interface, uint64_t *counters){
+  for(auto i = counter_type_count; i--;){
+    std::ifstream f("/sys/class/net/" + interface + "/statistics/" + std::string(counter_type_name[i]));
+    f >> counters[i];
+  }
+  return data_point_code_t::valid;
+}
+
+void diff_counters(uint64_t *counters0, uint64_t *counters1){
+  for(auto i = counter_type_count; i--;){
+    counters0[i] = counters1[i] - counters0[i];
+  }
 }
 
 uintptr_t signal_came = false;
@@ -42,22 +58,49 @@ int main(){
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
 
+  auto ns_per = 1000000;
+
   auto interface = get_default_interface();
   std::print("using interface: {}\n", interface);
 
-  auto prev_value = read_counters(interface);
+  counter_type_count = 1;
+  counter_type_name = (std::string_view*)__generic_mmap(counter_type_count * sizeof(std::string_view));
+  if((uintptr_t)counter_type_name > (uintptr_t)-0x1000){
+    __abort();
+  }
+  counter_type_name[0] = "rx_packets";
 
-  std::vector<uint64_t> data;
+  uint64_t *counters2[2];
+  {
+    auto _counters2 = __generic_mmap(2 * counter_type_count * sizeof(uint64_t));
+    if((uintptr_t)_counters2 > (uintptr_t)-0x1000){
+      __abort();
+    }
+    counters2[0] = (uint64_t *)&((uint8_t*)_counters2)[0 * (counter_type_count * sizeof(uint64_t))];
+    counters2[1] = (uint64_t *)&((uint8_t*)_counters2)[1 * (counter_type_count * sizeof(uint64_t))];
+  }
+
+  uintptr_t counter_flip = 0;
+
+  {
+    auto err = read_counters(interface, counters2[counter_flip]);
+    counter_flip ^= 1;
+    if(err != data_point_code_t::valid){
+      __abort();
+    }
+  }
+
+  std::vector<uint8_t> data;
   data.reserve(1000000);
 
   std::print("press ctrl+c to stop and save\n");
 
-  auto ns_per = 1000000;
-  auto wanted_time = T_nowi() + ns_per;
+  auto wanted_time = T_nowi();
+  auto first_wanted_time = wanted_time;
 
   bool next_is_failed = false;
-  uint64_t sum_diff = 0;
 
+  uint64_t total_points = 0;
   while(!__atomic_load_n(&signal_came, __ATOMIC_SEQ_CST)){
     wanted_time += ns_per;
 
@@ -66,42 +109,48 @@ int main(){
       now = T_nowi();
     }while(now < wanted_time);
 
-    auto current_value = read_counters(interface);
+    auto code = read_counters(interface, counters2[counter_flip]);
+    counter_flip ^= 1;
 
     /* incase function takes too long time */
     now = T_nowi();
 
-    auto data_value = current_value - prev_value;
-    prev_value = current_value;
-
     auto diff = now - wanted_time;
-    sum_diff += diff;
-    if(diff >= ns_per / 100){
+    if(code != data_point_code_t::valid){
       next_is_failed = true;
-      data_value = -1;
+    }
+    else if(diff >= ns_per / 100){
+      next_is_failed = true;
+      code = data_point_code_t::delayed;
     }
     else if(next_is_failed){
       next_is_failed = false;
-      data_value = -1;
+      code = data_point_code_t::delayed;
     }
 
-    data.emplace_back(data_value);
-  }
+    data.emplace_back((uint8_t)code);
 
-  std::print("writing json with {} data points...\n", data.size());
-
-  std::string json;
-  json = "[";
-  for(uintptr_t i = 0; i < data.size(); i++){
-    if(i){
-      json += ',';
+    if(code == data_point_code_t::valid){
+      diff_counters(counters2[counter_flip], counters2[counter_flip ^ 1]);
+      data.append_range(std::span((uint8_t*)counters2[counter_flip], counter_type_count * sizeof(uint64_t)));
     }
-    json += std::to_string(data[i]);
-  }
-  json += "]";
 
-  std::ofstream f("record.json");
-  f << json;
+    total_points += 1;
+  }
+
+  std::print("writing {} bytes with {} points to record.bin...\n", data.size(), total_points);
+
+  {
+    std::ofstream f("record.ifsr", std::ios::binary);
+    uint64_t header[] = {
+      counter_type_count,
+      (uint64_t)ns_per,
+      total_points,
+      data.size(),
+    };
+    f.write((const char*)header, sizeof(header));
+    f.write((const char*)data.data(), data.size());
+  }
 
   std::print("done\n");
 
