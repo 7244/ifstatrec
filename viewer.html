@@ -26,11 +26,13 @@
     const info = document.getElementById('info');
 
     const FLAG_VALID = 0;
-    const FLAG_SAMPLING_DELAYED = 1;
-    const FLAG_POST_FAILED = 2;
+    const FLAG_DELAYED = 1;
+
+    const SERIES_COLORS = ['#2563eb', '#16a34a', '#9333ea', '#eab308', '#dc2626'];
 
     let data = [];
     let nsPer = 0;
+    let counterCount = 0;
     let padding = 60;
     let width, height;
     let viewStart = 0;
@@ -47,31 +49,38 @@
     }
 
     function getViewRange() {
-      const maxTime = (data.length - 1);
-      const start = (viewStart !== null && !isNaN(viewStart)) ? viewStart : 0;
-      let end = (viewEnd !== null && !isNaN(viewEnd)) ? viewEnd : maxTime;
-      if (end <= start) { viewStart = 0; viewEnd = maxTime; return { start: 0, end: maxTime, span: maxTime }; }
-      return { start, end, span: end - start };
-    }
-
-    function getVisiblePackets() {
-      const { start, end } = getViewRange();
-      const packets = [];
-      for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
-        packets.push(data[i]);
+      const maxTime = data.length - 1;
+      if (maxTime <= 0) return { start: 0, end: 0, span: 0 };
+      if (viewEnd === null || isNaN(viewEnd)) viewEnd = maxTime;
+      if (viewStart < 0) viewStart = 0;
+      if (viewEnd > maxTime) viewEnd = maxTime;
+      if (viewEnd - viewStart < 0.5) {
+        const mid = (viewStart + viewEnd) / 2;
+        viewStart = mid - 0.25;
+        viewEnd = mid + 0.25;
+        if (viewStart < 0) { viewEnd -= viewStart; viewStart = 0; }
+        if (viewEnd > maxTime) { viewStart -= viewEnd - maxTime; viewEnd = maxTime; }
       }
-      return packets;
+      return { start: viewStart, end: viewEnd, span: viewEnd - viewStart };
     }
 
     function draw() {
       if (!data.length) return;
       const { start, end } = getViewRange();
-      if (start === end) return;
-      const packets = getVisiblePackets();
-      const maxPackets = packets.length ? Math.max(...packets.map(p => p.value)) : 1;
+      if (!end) return;
       const plotW = width - padding * 2;
       const plotH = height - padding * 2;
       const timeSpan = end - start;
+
+      let maxVals = new Array(counterCount).fill(0);
+      for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
+        if (data[i].flags === FLAG_VALID) {
+          for (let j = 0; j < counterCount; j++) {
+            if (data[i].values[j] > maxVals[j]) maxVals[j] = data[i].values[j];
+          }
+        }
+      }
+      if (maxVals.every(v => v === 0)) maxVals = maxVals.map(() => 1);
 
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = '#fff';
@@ -88,7 +97,7 @@
         ctx.fillStyle = '#666';
         ctx.font = '11px monospace';
         ctx.textAlign = 'right';
-        ctx.fillText(Math.round(maxPackets * (5 - i) / 5), padding - 8, y + 4);
+        ctx.fillText(Math.round(maxVals[0] * (5 - i) / 5), padding - 8, y + 4);
       }
 
       const maxTicks = 10;
@@ -110,32 +119,30 @@
         ctx.fillText((t / 1000).toFixed(2) + 's', x, height - padding + 20);
       }
 
-      ctx.strokeStyle = '#2563eb';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      let prevFailed = false;
-      for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
-        const t = i;
-        const x = padding + ((t - start) / timeSpan) * plotW;
-        const isFailed = data[i].flags !== FLAG_VALID;
-        if (isFailed) {
-          prevFailed = true;
-          continue;
+      for (let j = 0; j < counterCount; j++) {
+        ctx.strokeStyle = SERIES_COLORS[j % SERIES_COLORS.length];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        let prevFailed = false;
+        for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
+          const x = padding + ((i - start) / timeSpan) * plotW;
+          if (data[i].flags !== FLAG_VALID) {
+            prevFailed = true;
+            continue;
+          }
+          const y = height - padding - (data[i].values[j] / maxVals[j]) * plotH;
+          if (prevFailed || i === 0 || (i > 0 && (i - 1) < start)) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+          prevFailed = false;
         }
-        const y = height - padding - (data[i].value / maxPackets) * plotH;
-        if (prevFailed || i === 0 || (i > 0 && (i - 1) < start)) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-        prevFailed = false;
+        ctx.stroke();
       }
-      ctx.stroke();
 
       ctx.fillStyle = '#2563eb';
       for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
-        const t = i;
-        const x = padding + ((t - start) / timeSpan) * plotW;
-        const isFailed = data[i].flags !== FLAG_VALID;
-        if (isFailed) {
-          ctx.strokeStyle = data[i].flags === FLAG_SAMPLING_DELAYED ? '#dc2626' : '#f97316';
+        const x = padding + ((i - start) / timeSpan) * plotW;
+        if (data[i].flags !== FLAG_VALID) {
+          ctx.strokeStyle = '#dc2626';
           ctx.lineWidth = 2;
           const y = padding + 10;
           ctx.beginPath();
@@ -145,11 +152,13 @@
           ctx.lineTo(x - 5, y + 5);
           ctx.stroke();
         } else {
-          const y = height - padding - (data[i].value / maxPackets) * plotH;
-          ctx.fillStyle = '#2563eb';
-          ctx.beginPath();
-          ctx.arc(x, y, 2, 0, Math.PI * 2);
-          ctx.fill();
+          for (let j = 0; j < counterCount; j++) {
+            const y = height - padding - (data[i].values[j] / maxVals[j]) * plotH;
+            ctx.fillStyle = SERIES_COLORS[j % SERIES_COLORS.length];
+            ctx.beginPath();
+            ctx.arc(x, y, 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
 
@@ -159,23 +168,19 @@
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (!data.length) return;
-      if (viewEnd === null || isNaN(viewEnd)) {
-        viewEnd = data.length - 1;
-      }
-      if (viewStart === viewEnd) {
-        viewStart = 0;
-        viewEnd = data.length - 1;
-      }
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      if (mx < padding || mx > width - padding || my < padding || my > height - padding) return;
       const plotW = width - padding * 2;
-      const currentSpan = viewEnd - viewStart;
-      const mouseTime = viewStart + ((mx - padding) / plotW) * currentSpan;
+      const { start, end } = getViewRange();
+      const currentSpan = end - start;
+      const mouseRatio = (mx - padding) / plotW;
+      const mouseTime = start + mouseRatio * currentSpan;
       const zoomFactor = e.deltaY < 0 ? 0.8 : 1.25;
       const newSpan = currentSpan * zoomFactor;
-      const mouseRatio = (mouseTime - viewStart) / currentSpan;
-      viewStart = mouseTime - newSpan * mouseRatio;
-      viewEnd = mouseTime + newSpan * (1 - mouseRatio);
+      viewStart = mouseTime - mouseRatio * newSpan;
+      viewEnd = mouseTime + (1 - mouseRatio) * newSpan;
       draw();
     }, { passive: false });
 
@@ -183,32 +188,23 @@
       if (isPanning) {
         tooltip.style.display = 'none';
         if (!data.length) { isPanning = false; return; }
-        if (viewEnd === null || isNaN(viewEnd)) {
-          viewEnd = data.length - 1;
-        }
-        if (viewStart === viewEnd) {
-          viewStart = 0;
-          viewEnd = data.length - 1;
-        }
         const dx = e.clientX - panStart;
         panStart = e.clientX;
+        const { start, end } = getViewRange();
         const plotW = width - padding * 2;
-        const timeSpan = viewEnd - viewStart;
-        const timeDelta = -dx / plotW * timeSpan;
+        const timeDelta = -dx / plotW * (end - start);
         viewStart += timeDelta;
         viewEnd += timeDelta;
+        const maxTime = data.length - 1;
         if (viewStart < 0) { viewEnd -= viewStart; viewStart = 0; }
-        if (viewEnd > data.length - 1) { viewStart -= viewEnd - (data.length - 1); viewEnd = data.length - 1; }
+        if (viewEnd > maxTime) { viewStart -= viewEnd - maxTime; viewEnd = maxTime; }
+        if (viewStart < 0) viewStart = 0;
         draw();
       } else {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
         const { start, end } = getViewRange();
-        const packets = getVisiblePackets();
-const maxPackets = packets.length ? Math.max(...packets.map(p => p.value)) : 1;
         const plotW = width - padding * 2;
-        const plotH = height - padding * 2;
         const timeSpan = end - start;
         const time = start + (mx - padding) / plotW * timeSpan;
         let closestIdx = null, minDist = Infinity;
@@ -220,9 +216,12 @@ const maxPackets = packets.length ? Math.max(...packets.map(p => p.value)) : 1;
           tooltip.style.display = 'block';
           tooltip.style.left = (e.clientX + 10) + 'px';
           tooltip.style.top = (e.clientY - 20) + 'px';
-          const isFailed = data[closestIdx].flags !== FLAG_VALID;
-          const flagLabel = data[closestIdx].flags === FLAG_SAMPLING_DELAYED ? 'SAMPLING_DELAYED' : data[closestIdx].flags === FLAG_POST_FAILED ? 'POST_FAILED' : '';
-          tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  packets=${isFailed ? flagLabel : data[closestIdx].value}`;
+          const pt = data[closestIdx];
+          if (pt.flags === FLAG_DELAYED) {
+            tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  DELAYED`;
+          } else {
+            tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  ${pt.values.join(' / ')}`;
+          }
         }
       }
     });
@@ -232,41 +231,43 @@ const maxPackets = packets.length ? Math.max(...packets.map(p => p.value)) : 1;
     canvas.addEventListener('dblclick', () => {
       viewStart = 0;
       viewEnd = null;
+      getViewRange();
       draw();
     });
 
     canvas.addEventListener('mousedown', (e) => {
       if (!data.length) return;
-      if (viewEnd === null || isNaN(viewEnd)) {
-        viewEnd = data.length - 1;
-      }
-      if (viewStart === viewEnd) {
-        viewStart = 0;
-        viewEnd = data.length - 1;
-      }
       isPanning = true;
       panStart = e.clientX;
     });
 
-    fetch('record.bin')
+    fetch('record.ifsr')
       .then(r => r.arrayBuffer())
       .then(buf => {
         const view = new DataView(buf);
-        const nsPerVal = view.getBigUint64(0, true);
-        const count = Number(view.getBigUint64(8, true));
-        nsPer = Number(nsPerVal);
+        let off = 0;
+        counterCount = Number(view.getBigUint64(off, true)); off += 8;
+        nsPer = Number(view.getBigUint64(off, true)); off += 8;
+        const totalPoints = Number(view.getBigUint64(off, true)); off += 8;
+        const dataBytes = Number(view.getBigUint64(off, true)); off += 8;
+
         data = [];
-        for (let i = 0; i < count; i++) {
-          const off = 16 + i * 9;
-          data.push({
-            value: Number(view.getBigUint64(off, true)),
-            flags: view.getUint8(off + 8),
-          });
+        for (let i = 0; i < totalPoints; i++) {
+          const code = view.getUint8(off); off += 1;
+          if (code === FLAG_VALID) {
+            const values = [];
+            for (let j = 0; j < counterCount; j++) {
+              values.push(Number(view.getBigUint64(off, true))); off += 8;
+            }
+            data.push({ flags: code, values });
+          } else {
+            data.push({ flags: code });
+          }
         }
         draw();
       })
-      .catch(() => {
-        info.textContent = 'Error: record.bin not found';
+      .catch(e => {
+        info.textContent = 'Error: ' + e;
       });
 
     window.addEventListener('resize', resize);
