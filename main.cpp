@@ -37,6 +37,7 @@ std::string_view *counter_type_name;
 
 static data_point_code_t read_counters(const std::string& interface, uint64_t *counters){
   for(auto i = counter_type_count; i--;){
+    /* TODO can be expensive */
     std::ifstream f("/sys/class/net/" + interface + "/statistics/" + std::string(counter_type_name[i]));
     f >> counters[i];
   }
