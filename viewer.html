@@ -8,37 +8,26 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: monospace; background: #f5f5f5; padding: 20px; }
     #container { background: #fff; border: 1px solid #ccc; }
-    #tooltip { position: fixed; background: #333; color: #fff; padding: 4px 8px; font-size: 12px; display: none; }
+    #tooltip { position: fixed; background: #333; color: #fff; padding: 4px 8px; font-size: 12px; display: none; pointer-events: none; }
     #info { margin-bottom: 10px; color: #666; }
     canvas { display: block; cursor: crosshair; }
   </style>
 </head>
 <body>
   <div id="info">Loading...</div>
-  <div id="container">
-    <canvas id="canvas"></canvas>
-  </div>
+  <div id="container"><canvas id="canvas"></canvas></div>
   <div id="tooltip"></div>
   <script>
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const tooltip = document.getElementById('tooltip');
     const info = document.getElementById('info');
+    const FLAG_VALID = 0, FLAG_DELAYED = 1;
+    const COLORS = ['#2563eb', '#16a34a', '#9333ea', '#eab308', '#dc2626'];
 
-    const FLAG_VALID = 0;
-    const FLAG_DELAYED = 1;
-
-    const SERIES_COLORS = ['#2563eb', '#16a34a', '#9333ea', '#eab308', '#dc2626'];
-
-    let data = [];
-    let nsPer = 0;
-    let counterCount = 0;
-    let padding = 60;
-    let width, height;
-    let viewStart = 0;
-    let viewEnd = null;
-    let isPanning = false;
-    let panStart = 0;
+    let data = [], nsPer = 0, counterCount = 0, padding = 60;
+    let width, height, viewStart = 0, viewEnd = null;
+    let isPanning = false, panStartX = 0;
 
     function resize() {
       width = window.innerWidth - 40;
@@ -48,7 +37,7 @@
       draw();
     }
 
-    function getViewRange() {
+    function clampView() {
       const maxTime = data.length - 1;
       if (maxTime <= 0) return { start: 0, end: 0, span: 0 };
       if (viewEnd === null || isNaN(viewEnd)) viewEnd = maxTime;
@@ -66,18 +55,17 @@
 
     function draw() {
       if (!data.length) return;
-      const { start, end } = getViewRange();
+      const { start, end, span: timeSpan } = clampView();
       if (!end) return;
       const plotW = width - padding * 2;
       const plotH = height - padding * 2;
-      const timeSpan = end - start;
+      const iStart = Math.floor(start), iEnd = Math.min(Math.floor(end), data.length - 1);
 
       let maxVals = new Array(counterCount).fill(0);
-      for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
+      for (let i = iStart; i <= iEnd; i++) {
         if (data[i].flags === FLAG_VALID) {
-          for (let j = 0; j < counterCount; j++) {
+          for (let j = 0; j < counterCount; j++)
             if (data[i].values[j] > maxVals[j]) maxVals[j] = data[i].values[j];
-          }
         }
       }
       if (maxVals.every(v => v === 0)) maxVals = maxVals.map(() => 1);
@@ -88,24 +76,25 @@
 
       ctx.strokeStyle = '#ddd';
       ctx.lineWidth = 1;
+      ctx.fillStyle = '#666';
+      ctx.font = '11px monospace';
+      ctx.textAlign = 'right';
       for (let i = 0; i <= 5; i++) {
         const y = padding + (plotH / 5) * i;
         ctx.beginPath();
         ctx.moveTo(padding, y);
         ctx.lineTo(width - padding, y);
         ctx.stroke();
-        ctx.fillStyle = '#666';
-        ctx.font = '11px monospace';
-        ctx.textAlign = 'right';
         ctx.fillText(Math.round(maxVals[0] * (5 - i) / 5), padding - 8, y + 4);
       }
 
       const maxTicks = 10;
       const rawInterval = timeSpan / maxTicks;
-      const magnitude = Math.pow(10, Math.floor(Math.log10(rawInterval)));
-      const residual = rawInterval / magnitude;
-      let interval = residual > 5 ? magnitude * 10 : residual > 2 ? magnitude * 5 : residual > 1 ? magnitude * 2 : magnitude;
+      const mag = Math.pow(10, Math.floor(Math.log10(rawInterval)));
+      const res = rawInterval / mag;
+      const interval = res > 5 ? mag * 10 : res > 2 ? mag * 5 : res > 1 ? mag * 2 : mag;
       const numTicks = Math.max(2, Math.floor(timeSpan / interval));
+      ctx.textAlign = 'center';
       for (let i = 0; i <= numTicks; i++) {
         const t = start + i * interval;
         if (t > end + 0.0001) break;
@@ -114,49 +103,40 @@
         ctx.moveTo(x, padding);
         ctx.lineTo(x, height - padding);
         ctx.stroke();
-        ctx.fillStyle = '#666';
-        ctx.textAlign = 'center';
         ctx.fillText((t / 1000).toFixed(2) + 's', x, height - padding + 20);
       }
 
       for (let j = 0; j < counterCount; j++) {
-        ctx.strokeStyle = SERIES_COLORS[j % SERIES_COLORS.length];
+        ctx.strokeStyle = COLORS[j % COLORS.length];
         ctx.lineWidth = 2;
         ctx.beginPath();
         let prevFailed = false;
-        for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
+        for (let i = iStart; i <= iEnd; i++) {
+          if (i >= data.length) break;
           const x = padding + ((i - start) / timeSpan) * plotW;
-          if (data[i].flags !== FLAG_VALID) {
-            prevFailed = true;
-            continue;
-          }
+          if (data[i].flags !== FLAG_VALID) { prevFailed = true; continue; }
           const y = height - padding - (data[i].values[j] / maxVals[j]) * plotH;
-          if (prevFailed || i === 0 || (i > 0 && (i - 1) < start)) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+          prevFailed || i === iStart ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
           prevFailed = false;
         }
         ctx.stroke();
       }
 
-      ctx.fillStyle = '#2563eb';
-      for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
+      for (let i = iStart; i <= iEnd; i++) {
         const x = padding + ((i - start) / timeSpan) * plotW;
         if (data[i].flags !== FLAG_VALID) {
           ctx.strokeStyle = '#dc2626';
           ctx.lineWidth = 2;
           const y = padding + 10;
           ctx.beginPath();
-          ctx.moveTo(x - 5, y - 5);
-          ctx.lineTo(x + 5, y + 5);
-          ctx.moveTo(x + 5, y - 5);
-          ctx.lineTo(x - 5, y + 5);
+          ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5);
+          ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5);
           ctx.stroke();
         } else {
           for (let j = 0; j < counterCount; j++) {
-            const y = height - padding - (data[i].values[j] / maxVals[j]) * plotH;
-            ctx.fillStyle = SERIES_COLORS[j % SERIES_COLORS.length];
+            ctx.fillStyle = COLORS[j % COLORS.length];
             ctx.beginPath();
-            ctx.arc(x, y, 2, 0, Math.PI * 2);
+            ctx.arc(x, height - padding - (data[i].values[j] / maxVals[j]) * plotH, 2, 0, Math.PI * 2);
             ctx.fill();
           }
         }
@@ -169,16 +149,14 @@
       e.preventDefault();
       if (!data.length) return;
       const rect = canvas.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
       if (mx < padding || mx > width - padding || my < padding || my > height - padding) return;
       const plotW = width - padding * 2;
-      const { start, end } = getViewRange();
+      const { start, end } = clampView();
       const currentSpan = end - start;
       const mouseRatio = (mx - padding) / plotW;
       const mouseTime = start + mouseRatio * currentSpan;
-      const zoomFactor = e.deltaY < 0 ? 0.8 : 1.25;
-      const newSpan = currentSpan * zoomFactor;
+      const newSpan = currentSpan * (e.deltaY < 0 ? 0.8 : 1.25);
       viewStart = mouseTime - mouseRatio * newSpan;
       viewEnd = mouseTime + (1 - mouseRatio) * newSpan;
       draw();
@@ -188,11 +166,10 @@
       if (isPanning) {
         tooltip.style.display = 'none';
         if (!data.length) { isPanning = false; return; }
-        const dx = e.clientX - panStart;
-        panStart = e.clientX;
-        const { start, end } = getViewRange();
-        const plotW = width - padding * 2;
-        const timeDelta = -dx / plotW * (end - start);
+        const dx = e.clientX - panStartX;
+        panStartX = e.clientX;
+        const { start, end } = clampView();
+        const timeDelta = -dx / (width - padding * 2) * (end - start);
         viewStart += timeDelta;
         viewEnd += timeDelta;
         const maxTime = data.length - 1;
@@ -203,10 +180,9 @@
       } else {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
-        const { start, end } = getViewRange();
+        const { start, end } = clampView();
         const plotW = width - padding * 2;
-        const timeSpan = end - start;
-        const time = start + (mx - padding) / plotW * timeSpan;
+        const time = start + (mx - padding) / plotW * (end - start);
         let closestIdx = null, minDist = Infinity;
         for (let i = Math.floor(start); i <= Math.floor(end) && i < data.length; i++) {
           const dist = Math.abs(i - time);
@@ -217,11 +193,9 @@
           tooltip.style.left = (e.clientX + 10) + 'px';
           tooltip.style.top = (e.clientY - 20) + 'px';
           const pt = data[closestIdx];
-          if (pt.flags === FLAG_DELAYED) {
-            tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  DELAYED`;
-          } else {
-            tooltip.textContent = `t=${(closestIdx / 1000).toFixed(3)}s  ${pt.values.join(' / ')}`;
-          }
+          tooltip.textContent = pt.flags === FLAG_DELAYED
+            ? `t=${(closestIdx / 1000).toFixed(3)}s  DELAYED`
+            : `t=${(closestIdx / 1000).toFixed(3)}s  ${pt.values.join(' / ')}`;
         }
       }
     });
@@ -231,14 +205,14 @@
     canvas.addEventListener('dblclick', () => {
       viewStart = 0;
       viewEnd = null;
-      getViewRange();
+      clampView();
       draw();
     });
 
     canvas.addEventListener('mousedown', (e) => {
       if (!data.length) return;
       isPanning = true;
-      panStart = e.clientX;
+      panStartX = e.clientX;
     });
 
     fetch('record.ifsr')
@@ -246,19 +220,17 @@
       .then(buf => {
         const view = new DataView(buf);
         let off = 0;
-        counterCount = Number(view.getBigUint64(off, true)); off += 8;
-        nsPer = Number(view.getBigUint64(off, true)); off += 8;
-        const totalPoints = Number(view.getBigUint64(off, true)); off += 8;
-        const dataBytes = Number(view.getBigUint64(off, true)); off += 8;
-
+        const r64 = () => { const v = Number(view.getBigUint64(off, true)); off += 8; return v; };
+        counterCount = r64();
+        nsPer = r64();
+        const totalPoints = r64();
+        r64();
         data = [];
         for (let i = 0; i < totalPoints; i++) {
-          const code = view.getUint8(off); off += 1;
+          const code = view.getUint8(off); off++;
           if (code === FLAG_VALID) {
             const values = [];
-            for (let j = 0; j < counterCount; j++) {
-              values.push(Number(view.getBigUint64(off, true))); off += 8;
-            }
+            for (let j = 0; j < counterCount; j++) values.push(r64());
             data.push({ flags: code, values });
           } else {
             data.push({ flags: code });
@@ -266,9 +238,7 @@
         }
         draw();
       })
-      .catch(e => {
-        info.textContent = 'Error: ' + e;
-      });
+      .catch(e => info.textContent = 'Error: ' + e);
 
     window.addEventListener('resize', resize);
     resize();
